@@ -1,0 +1,50 @@
+
+name: Build and Push New API Docker Image
+
+on:
+  push:
+    branches:
+      - custom
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 获取 custom 分支源码
+      - name: Checkout custom branch
+        uses: actions/checkout@v6
+        with:
+          ref: custom
+
+      # 2. 配置 Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # 3. 登录 Docker Hub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 4. 构建 Docker 镜像并推送
+      - name: Build and Push Image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            wucheng6666/newapi:latest
+            wucheng6666/newapi:custom
+            wucheng6666/newapi:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
