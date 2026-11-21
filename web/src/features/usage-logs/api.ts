@@ -88,6 +88,32 @@ export const getUserLogStats = (
   params: Omit<GetLogStatsParams, 'username' | 'channel'> = {}
 ) => fetchLogStats('/api/log', params, false)
 
+export async function getTodayTokenQuotaStats(params?: {
+  start_timestamp?: number
+  end_timestamp?: number
+}) {
+  const query = new URLSearchParams()
+  if (params?.start_timestamp) query.set('start_timestamp', String(Math.floor(params.start_timestamp / 1000)))
+  if (params?.end_timestamp) query.set('end_timestamp', String(Math.floor(params.end_timestamp / 1000)))
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  const res = await api.get(`/api/log/today-token-quota${suffix}`)
+  return res.data as {
+    success: boolean
+    data?: {
+      tokens: { token_name: string; quota: number }[]
+      channels: { channel_id: number; channel_name: string; quota: number }[]
+      details: {
+        token_name: string
+        channel_id: number
+        channel_name: string
+        quota: number
+        token_id: number
+        multiplier: number | null
+      }[]
+    }
+  }
+}
+
 /**
  * Stream the logs matching params, newest first. The server sends one JSON
  * log per line and ends with an API response object; a stream that ends

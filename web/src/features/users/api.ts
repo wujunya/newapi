@@ -145,6 +145,18 @@ export async function deleteUser(
   return res.data
 }
 
+export async function bulkDeleteUsers(
+  userIds: number[],
+  proofToken: string
+): Promise<ApiResponse<{ deleted: number }>> {
+  const res = await api.post(
+    '/api/user/bulk-delete',
+    { user_ids: userIds },
+    securityProofConfig(proofToken)
+  )
+  return res.data
+}
+
 /**
  * Manage user (promote, demote, enable, disable, delete); requires an
  * `admin.user.manage` proof (`admin.user.delete` for deletion)

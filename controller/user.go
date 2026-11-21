@@ -964,6 +964,35 @@ func DeleteUser(c *gin.Context) {
 	return
 }
 
+func BulkDeleteUsers(c *gin.Context) {
+	var req service.AdminUserBulkDeleteContext
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	req, err := req.Normalize()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserBulkDelete, req)
+	if authorization == nil {
+		return
+	}
+	deleted, err := model.BulkHardDeleteUsers(c.GetInt("id"), req.UserIDs)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	for _, user := range deleted {
+		recordManageAuditFor(c, user.ID, "user.delete", map[string]any{
+			"username": user.Username, "id": user.ID, "batch_size": len(deleted),
+			"verification_method": authorization.Method, "revoked_access_tokens": user.RevokedAccessTokens,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"deleted": len(deleted)}})
+}
+
 func DeleteSelf(c *gin.Context) {
 	setAuthNoStore(c)
 	succeeded := false

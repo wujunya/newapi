@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import type { Row } from '@tanstack/react-table'
+import { getCoreRowModel, useReactTable, type Row } from '@tanstack/react-table'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useEffect } from 'react'
@@ -26,6 +26,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
 
 import type { User } from '../../types'
+import { DataTableBulkActions } from '../data-table-bulk-actions'
 import { DataTableRowActions } from '../data-table-row-actions'
 import { UsersDeleteDialog } from '../users-delete-dialog'
 import { UsersProvider, useUsers } from '../users-provider'
@@ -141,6 +142,44 @@ it('deleting a user sends the request only with a single-use proof for that user
     }),
     expect.anything()
   )
+})
+
+const bulkTargets = [target, { ...target, id: 3, username: 'second-user' }]
+
+function BulkDeleteHarness() {
+  const table = useReactTable({
+    data: bulkTargets,
+    columns: [],
+    getRowId: (user) => String(user.id),
+    getCoreRowModel: getCoreRowModel(),
+    initialState: { rowSelection: { '2': true, '3': true } },
+  })
+  return <DataTableBulkActions table={table} />
+}
+
+it('bulk deletion verifies once and sends the same list of users to the batch endpoint', async () => {
+  const proof = mockVerification('admin.user.bulk_delete', 'batch-proof')
+  const post = vi.spyOn(api, 'post').mockResolvedValueOnce(proof)
+    .mockResolvedValueOnce({ data: { success: true, data: { deleted: 2 } } })
+  const del = vi.spyOn(api, 'delete')
+  renderInProvider(<BulkDeleteHarness />)
+
+  await userEvent.click(screen.getByRole('button', { name: 'Bulk delete (2)' }))
+  expect(screen.getByText('managed-user (#2)')).toBeInTheDocument()
+  expect(screen.getByText('second-user (#3)')).toBeInTheDocument()
+  expect(post).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
+  await completeTwoFactorVerification()
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Bulk delete' })).toBeDisabled()
+  )
+  expect(post).toHaveBeenCalledTimes(2)
+  expect(post).toHaveBeenNthCalledWith(1, '/api/verify', expect.objectContaining({
+    scope: 'admin.user.bulk_delete', context: { user_ids: [2, 3] },
+  }), expect.anything())
+  expect(post).toHaveBeenNthCalledWith(2, '/api/user/bulk-delete', { user_ids: [2, 3] },
+    expect.objectContaining({ headers: { 'X-Security-Proof': 'batch-proof' }, singleUseAuthorization: true }))
+  expect(del).not.toHaveBeenCalled()
 })
 
 it('cancelling verification leaves the user untouched and returns to the confirmation', async () => {

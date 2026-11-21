@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -688,6 +690,131 @@ type Stat struct {
 	Quota int `json:"quota"`
 	Rpm   int `json:"rpm"`
 	Tpm   int `json:"tpm"`
+}
+
+type TokenQuotaStat struct {
+	TokenName string `json:"token_name"`
+	Quota     int    `json:"quota"`
+}
+
+type ChannelQuotaStat struct {
+	ChannelID   int    `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+	Quota       int    `json:"quota"`
+}
+
+type TokenChannelQuotaStat struct {
+	TokenName   string   `json:"token_name"`
+	ChannelID   int      `json:"channel_id"`
+	ChannelName string   `json:"channel_name"`
+	Quota       int      `json:"quota"`
+	TokenID     int      `json:"token_id"`
+	Multiplier  *float64 `json:"multiplier"`
+}
+
+func todayLogRange() (int64, int64) {
+	now := time.Now()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	return start.Unix(), start.Add(24*time.Hour - time.Nanosecond).Unix()
+}
+
+func SumQuotaByToken(start, end int64) ([]TokenQuotaStat, error) {
+	if start == 0 || end == 0 {
+		start, end = todayLogRange()
+	}
+	var stats []TokenQuotaStat
+	err := LOG_DB.Table("logs").Select("token_name, COALESCE(sum(quota), 0) quota").Where("type = ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, start, end).Group("token_name").Order("quota DESC").Scan(&stats).Error
+	return stats, err
+}
+
+func SumQuotaByChannel(start, end int64) ([]ChannelQuotaStat, error) {
+	if start == 0 || end == 0 {
+		start, end = todayLogRange()
+	}
+	var stats []ChannelQuotaStat
+	err := LOG_DB.Table("logs").Select("logs.channel_id, COALESCE(channels.name, '') channel_name, COALESCE(sum(logs.quota), 0) quota").Joins("LEFT JOIN channels ON channels.id = logs.channel_id").Where("logs.type = ? AND logs.created_at >= ? AND logs.created_at <= ?", LogTypeConsume, start, end).Group("logs.channel_id, channels.name").Order("quota DESC").Scan(&stats).Error
+	return stats, err
+}
+
+func SumQuotaByTokenChannel(start, end int64) ([]TokenChannelQuotaStat, error) {
+	if start == 0 || end == 0 {
+		start, end = todayLogRange()
+	}
+	rows, err := LOG_DB.Table("logs").Select("token_id, token_name, channel_id, quota, other").
+		Where("type = ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, start, end).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type statKey struct {
+		tokenID, channelID int
+		tokenName          string
+		ratio              float64
+		knownRatio         bool
+	}
+	totals := make(map[statKey]int)
+	channelIDs := types.NewSet[int]()
+	for rows.Next() {
+		var key statKey
+		var quota int
+		var other *string
+		if err := rows.Scan(&key.tokenID, &key.tokenName, &key.channelID, &quota, &other); err != nil {
+			return nil, err
+		}
+		if other != nil {
+			key.ratio, key.knownRatio = quotaLogTokenMultiplier(*other)
+		}
+		totals[key] += quota
+		channelIDs.Add(key.channelID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+
+	names := make(map[int]string)
+	if channelIDs.Len() > 0 {
+		var channels []struct {
+			ID   int
+			Name string
+		}
+		if err := DB.Table("channels").Select("id, name").Where("id IN ?", channelIDs.Items()).Scan(&channels).Error; err != nil {
+			return nil, err
+		}
+		for _, channel := range channels {
+			names[channel.ID] = channel.Name
+		}
+	}
+	stats := make([]TokenChannelQuotaStat, 0, len(totals))
+	for key, quota := range totals {
+		stat := TokenChannelQuotaStat{TokenID: key.tokenID, TokenName: key.tokenName, ChannelID: key.channelID, ChannelName: names[key.channelID], Quota: quota}
+		if key.knownRatio {
+			stat.Multiplier = &key.ratio
+		}
+		stats = append(stats, stat)
+	}
+	sort.Slice(stats, func(i, j int) bool { return stats[i].Quota > stats[j].Quota })
+	return stats, nil
+}
+
+// Match the effective ratio shown by the individual usage-log rows.
+func quotaLogTokenMultiplier(other string) (float64, bool) {
+	var metadata struct {
+		GroupRatio     *float64 `json:"group_ratio"`
+		UserGroupRatio *float64 `json:"user_group_ratio"`
+	}
+	if common.UnmarshalJsonStr(other, &metadata) != nil {
+		return 0, false
+	}
+	ratio := metadata.UserGroupRatio
+	if ratio == nil || *ratio == -1 {
+		ratio = metadata.GroupRatio
+	}
+	if ratio == nil || *ratio < 0 || math.IsNaN(*ratio) || math.IsInf(*ratio, 0) {
+		return 0, false
+	}
+	return *ratio, true
 }
 
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {

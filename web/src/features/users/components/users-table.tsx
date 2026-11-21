@@ -18,7 +18,12 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import type { OnChangeFn, SortingState } from '@tanstack/react-table'
+import {
+  functionalUpdate,
+  type OnChangeFn,
+  type RowSelectionState,
+  type SortingState,
+} from '@tanstack/react-table'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -34,6 +39,7 @@ import {
   createServerError,
   requireServerSuccess,
 } from '@/lib/server-error-message'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { getGroups, getUsers, searchUsers } from '../api'
 import {
@@ -65,7 +71,12 @@ function isDisabledUserRow(user: User) {
 export function UsersTable() {
   const { t } = useTranslation()
   const columns = useUsersColumns()
-  const { refreshTrigger } = useUsers()
+  const { refreshTrigger, verificationActive } = useUsers()
+  const currentUser = useAuthStore((state) => state.auth.user)
+  const [selection, setSelection] = useState<{
+    scope: string
+    rows: RowSelectionState
+  }>({ scope: '', rows: {} })
   const isMobile = useMediaQuery('(max-width: 640px)')
   const [sorting, setSorting] = useState<SortingState>([])
 
@@ -181,11 +192,40 @@ export function UsersTable() {
   })
 
   const users = data?.items || []
+  const selectionScope = JSON.stringify([
+    currentUser?.id,
+    currentUser?.role,
+    pagination,
+    globalFilter,
+    statusFilter,
+    roleFilter,
+    groupFilter,
+    sortParams,
+  ])
+
+  if (selection.scope !== selectionScope) {
+    setSelection({ scope: selectionScope, rows: {} })
+  }
 
   const { table } = useDataTable({
     data: users,
     columns,
-    enableRowSelection: true,
+    getRowId: (user) => String(user.id),
+    enableRowSelection: ({ original: user }) =>
+      !isFetching &&
+      !!currentUser &&
+      user.id !== currentUser.id &&
+      user.role < currentUser.role &&
+      !isUserDeleted(user),
+    rowSelection: selection.scope === selectionScope ? selection.rows : {},
+    onRowSelectionChange: (updater) =>
+      setSelection((previous) => ({
+        scope: selectionScope,
+        rows: functionalUpdate(
+          updater,
+          previous.scope === selectionScope ? previous.rows : {}
+        ),
+      })),
     columnFilters,
     globalFilter,
     pagination,
@@ -227,6 +267,12 @@ export function UsersTable() {
       skeletonKeyPrefix='users-skeleton'
       applyHeaderSize
       toolbarProps={{
+        preActions: (
+          <DataTableBulkActions
+            table={table}
+            disabled={isFetching || verificationActive}
+          />
+        ),
         searchPlaceholder: t('Filter by username, name or email...'),
         searchDebounceMs: 500,
         filters: [
@@ -257,7 +303,6 @@ export function UsersTable() {
         if (!isDisabledUserRow(row.original)) return undefined
         return isMobile ? DISABLED_ROW_MOBILE : DISABLED_ROW_DESKTOP
       }}
-      bulkActions={<DataTableBulkActions table={table} />}
     />
   )
 }

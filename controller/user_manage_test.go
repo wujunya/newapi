@@ -126,6 +126,57 @@ func manageUserProof(t *testing.T, db *gorm.DB, operation service.VerificationOp
 	return identity, proof
 }
 
+func TestBulkDeleteUsersProofAndAtomicity(t *testing.T) {
+	t.Setenv("TEST_MANAGE_USER_DIALECT", "sqlite")
+	db := setupManageUserTestDB(t)
+	for _, table := range []any{&model.TwoFABackupCode{}, &model.Token{}, &model.UserOAuthBinding{}, &model.ExternalIdentityClaim{}} {
+		require.NoError(t, db.AutoMigrate(table))
+	}
+	createTarget := func(name string, role int) model.User {
+		u := model.User{Username: name, Role: role, Status: common.UserStatusEnabled, AffCode: name, AuthVersion: 1}
+		require.NoError(t, db.Create(&u).Error)
+		return u
+	}
+	first := createTarget("batch-first", common.RoleCommonUser)
+	second := createTarget("batch-second", common.RoleCommonUser)
+	root := createTarget("batch-root", common.RoleRootUser)
+	body := func(a, b int) string { return fmt.Sprintf(`{"user_ids":[%d,%d]}`, a, b) }
+	operation := func(payload string) service.VerificationOperation {
+		return service.VerificationOperation{Scope: service.VerificationScopeAdminUserBulkDelete, Context: []byte(payload)}
+	}
+	identity, proof := manageUserProof(t, db, operation(body(first.Id, root.Id)))
+	issue := func(payload string) string {
+		binding, err := service.BindVerificationOperation(operation(payload))
+		require.NoError(t, err)
+		proof, _, err := service.IssueSecurityProof(identity, service.VerificationMethodPassword, binding)
+		require.NoError(t, err)
+		return proof
+	}
+	request := func(identity service.AuthIdentity, proof, payload string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/user/bulk-delete", strings.NewReader(payload))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Request.Header.Set("X-Security-Proof", proof)
+		c.Set("id", identity.UserID)
+		c.Set("role", common.RoleRootUser)
+		c.Set("session_id", identity.SessionID)
+		c.Set("auth_version", identity.UserAuthVersion)
+		c.Set("session_version", identity.SessionVersion)
+		BulkDeleteUsers(c)
+		return w
+	}
+	require.Contains(t, request(identity, proof, body(first.Id, root.Id)).Body.String(), `"success":false`)
+	require.NoError(t, db.First(&model.User{}, first.Id).Error)
+	proof = issue(body(first.Id, second.Id))
+	require.Contains(t, request(identity, proof, body(first.Id, root.Id)).Body.String(), `"success":false`)
+	proof = issue(body(first.Id, second.Id))
+	require.Contains(t, request(identity, proof, body(second.Id, first.Id)).Body.String(), `"deleted":2`)
+	require.ErrorIs(t, db.Unscoped().First(&model.User{}, first.Id).Error, gorm.ErrRecordNotFound)
+	require.ErrorIs(t, db.Unscoped().First(&model.User{}, second.Id).Error, gorm.ErrRecordNotFound)
+	require.Contains(t, request(identity, proof, body(first.Id, second.Id)).Body.String(), `"success":false`)
+}
+
 func TestManageUserDisableAdvancesAuthVersionOnceAndRevokesSession(t *testing.T) {
 	db := setupManageUserTestDB(t)
 	now := time.Now().Unix()

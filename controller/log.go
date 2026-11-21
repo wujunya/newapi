@@ -200,6 +200,34 @@ func GetLogByKey(c *gin.Context) {
 	})
 }
 
+func GetTodayTokenQuotaStat(c *gin.Context) {
+	start, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	end, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	tokenStats, err := model.SumQuotaByToken(start, end)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	channelStats, err := model.SumQuotaByChannel(start, end)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	detailStats, err := model.SumQuotaByTokenChannel(start, end)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"tokens":   tokenStats,
+			"channels": channelStats,
+			"details":  detailStats,
+		},
+	})
+}
+
 func GetLogsStat(c *gin.Context) {
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)

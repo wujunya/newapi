@@ -20,7 +20,7 @@ import { useQueryClient, useIsFetching, useQuery } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
 import type { Table } from '@tanstack/react-table'
 import { Eye, EyeOff } from 'lucide-react'
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Badge } from '@/components/ui/badge'
@@ -64,6 +64,27 @@ type LogTypeValue = (typeof LOG_TYPE_FILTERS)[number]['value']
 const logTypeValueSet = new Set<string>(
   LOG_TYPE_FILTERS.map((type) => type.value)
 )
+const LOG_FILTER_HISTORY_KEY = 'newapi.usage-logs.search-history'
+const MAX_LOG_FILTER_HISTORY = 20
+
+type LogFilterHistory = Partial<Record<keyof CommonLogFilters, string>>
+
+function readLogFilterHistory(): LogFilterHistory[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(LOG_FILTER_HISTORY_KEY) ?? '[]')
+    return Array.isArray(value) ? value.slice(0, MAX_LOG_FILTER_HISTORY) : []
+  } catch {
+    return []
+  }
+}
+
+function writeLogFilterHistory(history: LogFilterHistory[]) {
+  try {
+    localStorage.setItem(LOG_FILTER_HISTORY_KEY, JSON.stringify(history))
+  } catch {
+    // Ignore unavailable browser storage.
+  }
+}
 
 type CommonLogDraft = {
   sourceKey: string
@@ -120,10 +141,15 @@ export function CommonLogsFilterBar<TData>(
   props: CommonLogsFilterBarProps<TData>
 ) {
   const { t } = useTranslation()
+  const [tokenHistory, setTokenHistory] = useState<LogFilterHistory[]>([])
+  useEffect(() => {
+    setTokenHistory(readLogFilterHistory())
+  }, [])
   const isMobile = useMediaQuery('(max-width: 640px)')
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
+  const didResetOnMount = useRef(false)
   const { isAdminView: isAdmin } = useLogsViewScope()
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
   const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
@@ -212,22 +238,83 @@ export function CommonLogsFilterBar<TData>(
   )
 
   const handleApply = useCallback(
-    (nextFilters: CommonLogFilters = filters) => {
+    (
+      nextFilters: CommonLogFilters = filters,
+      nextLogType: LogTypeValue = logType
+    ) => {
       const filterParams = buildSearchParams(nextFilters, 'common')
       navigate({
         to: '/usage-logs/$section',
         params: { section: 'common' },
         search: {
           ...filterParams,
-          type: [logType],
+          type: [nextLogType],
           page: 1,
         },
       })
       queryClient.invalidateQueries({ queryKey: ['logs'] })
-      queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
+      const historyFields: LogFilterHistory = {
+        token: nextFilters.token,
+        username: nextFilters.username,
+        channel: nextFilters.channel,
+        requestId: nextFilters.requestId,
+        upstreamRequestId: nextFilters.upstreamRequestId,
+        model: nextFilters.model,
+      }
+      if (Object.values(historyFields).some(Boolean)) {
+        const nextHistory = [
+          historyFields,
+          ...tokenHistory.filter((item) => JSON.stringify(item) !== JSON.stringify(historyFields)),
+        ].slice(0, MAX_LOG_FILTER_HISTORY)
+        setTokenHistory(nextHistory)
+        writeLogFilterHistory(nextHistory)
+      }
     },
-    [filters, logType, navigate, queryClient]
+    [filters, logType, navigate, queryClient, tokenHistory]
   )
+
+  useEffect(() => {
+    if (didResetOnMount.current) return
+    didResetOnMount.current = true
+    const navigationType =
+      typeof performance !== 'undefined' &&
+      performance.getEntriesByType('navigation')[0] &&
+      (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming)
+        .type
+    if (
+      navigationType !== 'reload' ||
+      (!searchParams.model &&
+        !searchParams.group &&
+        !searchParams.token &&
+        !searchParams.username &&
+        !searchParams.channel &&
+        !searchParams.requestId &&
+        !searchParams.upstreamRequestId)
+    ) {
+      return
+    }
+    if (
+      searchParams.model ||
+      searchParams.group ||
+      searchParams.token ||
+      searchParams.username ||
+      searchParams.channel ||
+      searchParams.requestId ||
+      searchParams.upstreamRequestId
+    ) {
+      navigate({
+        to: '/usage-logs/$section',
+        params: { section: 'common' },
+        search: {
+          page: 1,
+          type: [LOG_TYPE_ALL_VALUE],
+          startTime: getDefaultTimeRange().start.getTime(),
+          endTime: getDefaultTimeRange().end.getTime(),
+        },
+        replace: true,
+      })
+    }
+  }, [navigate, searchParams.channel, searchParams.group, searchParams.model, searchParams.requestId, searchParams.token, searchParams.username, searchParams.upstreamRequestId])
 
   const handleReset = useCallback(() => {
     const { start, end } = getDefaultTimeRange()
@@ -262,6 +349,15 @@ export function CommonLogsFilterBar<TData>(
     [handleApply]
   )
 
+  const handleTextFilterBlur = useCallback(
+    (field: keyof CommonLogFilters) =>
+      (e: React.FocusEvent<HTMLInputElement>) => {
+        const value = e.currentTarget.value
+        handleApply({ ...filters, [field]: value || undefined })
+      },
+    [filters, handleApply]
+  )
+
   const hasExpandedFilters =
     !!filters.token ||
     !!filters.username ||
@@ -283,6 +379,13 @@ export function CommonLogsFilterBar<TData>(
   const sensitiveInputClass = sensitiveVisible
     ? undefined
     : '[-webkit-text-security:disc]'
+  const tokenHistoryOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(tokenHistory.map((item) => item.token).filter(Boolean))
+      ).map((token) => ({ label: token as string, value: token as string })),
+    [tokenHistory]
+  )
   const logTypeItems = useMemo(
     () =>
       LOG_TYPE_FILTERS.map((type) => ({
@@ -327,9 +430,7 @@ export function CommonLogsFilterBar<TData>(
         onChange={({ start, end }) => {
           handleChange('startTime', start)
           handleChange('endTime', end)
-          if (isMobile) {
-            handleApply({ ...filters, startTime: start, endTime: end })
-          }
+          handleApply({ ...filters, startTime: start, endTime: end })
         }}
       />
     </LogsFilterField>
@@ -339,8 +440,9 @@ export function CommonLogsFilterBar<TData>(
       <LogsFilterInput
         placeholder={t('Model Name')}
         value={filters.model || ''}
-        onChange={(e) => handleChange('model', e.target.value)}
-        onKeyDown={handleKeyDown}
+          onChange={(e) => handleChange('model', e.target.value)}
+          onBlur={handleTextFilterBlur('model')}
+          onKeyDown={handleKeyDown}
       />
     </LogsFilterField>
   )
@@ -355,7 +457,11 @@ export function CommonLogsFilterBar<TData>(
         className='h-8 min-w-0 text-sm leading-5'
         popupClassName={sensitiveInputClass}
         value={filters.group || ''}
-        onValueChange={(value) => handleChange('group', value ?? '')}
+        onValueChange={(value) => {
+          const nextFilters = { ...filters, group: value ?? '' }
+          handleChange('group', value ?? '')
+          handleApply(nextFilters)
+        }}
         onKeyDown={handleKeyDown}
       />
     </LogsFilterField>
@@ -379,6 +485,7 @@ export function CommonLogsFilterBar<TData>(
               logType: nextLogType,
             }
           })
+          handleApply(filters, nextLogType)
         }}
       >
         <SelectTrigger
@@ -435,12 +542,19 @@ export function CommonLogsFilterBar<TData>(
   )
   const advancedFilters = (
     <>
+      <datalist id='usage-log-token-history'>
+        {tokenHistoryOptions.map((option) => (
+          <option key={option.value} value={option.value} />
+        ))}
+      </datalist>
       <LogsFilterField>
         <LogsFilterInput
           placeholder={t('Token Name')}
           className={sensitiveInputClass}
           value={filters.token || ''}
+          list='usage-log-token-history'
           onChange={(e) => handleChange('token', e.target.value)}
+          onBlur={handleTextFilterBlur('token')}
           onKeyDown={handleKeyDown}
         />
       </LogsFilterField>
@@ -451,6 +565,7 @@ export function CommonLogsFilterBar<TData>(
             className={sensitiveInputClass}
             value={filters.username || ''}
             onChange={(e) => handleChange('username', e.target.value)}
+            onBlur={handleTextFilterBlur('username')}
             onKeyDown={handleKeyDown}
           />
         </LogsFilterField>
@@ -461,6 +576,7 @@ export function CommonLogsFilterBar<TData>(
             placeholder={t('Channel ID')}
             value={filters.channel || ''}
             onChange={(e) => handleChange('channel', e.target.value)}
+            onBlur={handleTextFilterBlur('channel')}
             onKeyDown={handleKeyDown}
           />
         </LogsFilterField>
@@ -470,6 +586,7 @@ export function CommonLogsFilterBar<TData>(
           placeholder={t('Request ID')}
           value={filters.requestId || ''}
           onChange={(e) => handleChange('requestId', e.target.value)}
+          onBlur={handleTextFilterBlur('requestId')}
           onKeyDown={handleKeyDown}
         />
       </LogsFilterField>
@@ -478,6 +595,7 @@ export function CommonLogsFilterBar<TData>(
           placeholder={t('Upstream Request ID')}
           value={filters.upstreamRequestId || ''}
           onChange={(e) => handleChange('upstreamRequestId', e.target.value)}
+          onBlur={handleTextFilterBlur('upstreamRequestId')}
           onKeyDown={handleKeyDown}
         />
       </LogsFilterField>
